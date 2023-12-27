@@ -1,15 +1,15 @@
 package com.example.kcellcurrencyexchange.service;
 
 import com.example.kcellcurrencyexchange.model.ConvertCurrencyRequestDTO;
+import com.example.kcellcurrencyexchange.model.ConvertCurrencyResponseDTO;
 import com.example.kcellcurrencyexchange.model.CurrencyRate;
 import lombok.RequiredArgsConstructor;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
-import java.util.Date;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
+import java.math.BigDecimal;
+import java.math.RoundingMode;
+import java.util.*;
 import java.util.stream.Collectors;
 
 import static com.example.kcellcurrencyexchange.model.Constants.*;
@@ -19,51 +19,83 @@ import static com.example.kcellcurrencyexchange.model.Constants.*;
 public class ExchangeOperationService {
 
     private final JdbcTemplate jdbcTemplate;
+    private final String exceptionMessage = "Ошибка: курс для валюты %s или %s не найден.\n";
 
-    public String convertCurrency (ConvertCurrencyRequestDTO request) {
-        String[] toCurrencies = request.getToCurrencies();
-        String fromCurrency = request.getFromCurrency();
-        Double amount = request.getAmount();
+    public ConvertCurrencyResponseDTO convertCurrency(ConvertCurrencyRequestDTO request) throws IllegalArgumentException {
+        validateRequest(request);
+        Map<String, BigDecimal> ratesMap = fetchCurrencyRates();
+        ConvertCurrencyResponseDTO response = createResponseObject(request);
 
-        Optional.ofNullable(toCurrencies).orElseThrow(() -> new IllegalArgumentException("toCurrencies cannot be null"));
-        Optional.ofNullable(fromCurrency).orElseThrow(() -> new IllegalArgumentException("fromCurrency cannot be null"));
-        Optional.ofNullable(amount).orElseThrow(() -> new IllegalArgumentException("amount cannot be null"));
-        List<CurrencyRate> rates = jdbcTemplate.query("SELECT * FROM currency_rate",
-                (rs, rowNum) -> new CurrencyRate(rs.getString("currency"), rs.getDouble("rate")));
+        Map<String, BigDecimal> convertedAmounts = new HashMap<>();
 
-        Map<String, Double> ratesMap = rates.stream().collect(Collectors.toMap(CurrencyRate::getCurrency, CurrencyRate::getRate));
-        StringBuilder result = new StringBuilder();
-
-        for (String toCurrency : toCurrencies) {
-            Double fromRate = ratesMap.getOrDefault(fromCurrency.toUpperCase(), null);
-            Double toRate = ratesMap.getOrDefault(toCurrency.toUpperCase(), null);
+        StringBuilder message = new StringBuilder();
+        for (String toCurrency : request.getToCurrencies()) {
+            BigDecimal fromRate = ratesMap.get(request.getFromCurrency().toUpperCase());
+            BigDecimal toRate = ratesMap.get(toCurrency.toUpperCase());
 
             if (fromRate == null || toRate == null) {
-                result.append(String.format("Ошибка: курс для валюты %s или %s не найден.\n", fromCurrency, toCurrency));
+                message.append(String.format(exceptionMessage, request.getFromCurrency(), toCurrency));
                 continue;
             }
 
-            double convertedAmount = amount * fromRate / toRate;
-            result.append(String.format("%.2f %s в %s = %.2f\n", amount, fromCurrency, toCurrency, convertedAmount));
+            BigDecimal convertedAmount = convertAmount(
+                    request.getAmount(),
+                    fromRate,
+                    toRate
+            );
+            convertedAmounts.put(toCurrency, convertedAmount);
 
-            recordExchangeOperation(fromCurrency, toCurrency, amount, convertedAmount);
+            recordExchangeOperation(request.getFromCurrency(), toCurrency, request.getAmount(), convertedAmount.doubleValue());
         }
 
-        return result.toString();
+        response.setConvertedAmounts(convertedAmounts);
+        response.setMessage(message.toString());
+        return response;
+    }
+
+    private BigDecimal convertAmount(BigDecimal amount, BigDecimal fromRate, BigDecimal toRate) {
+        return amount.multiply(fromRate).divide(toRate, 2, RoundingMode.HALF_UP);
+    }
+
+    private ConvertCurrencyResponseDTO createResponseObject(ConvertCurrencyRequestDTO request) {
+        ConvertCurrencyResponseDTO response = new ConvertCurrencyResponseDTO();
+        response.setFromCurrency(request.getFromCurrency());
+        response.setOriginalAmount(request.getAmount());
+
+        return response;
+    }
+
+    private void validateRequest(ConvertCurrencyRequestDTO request) {
+        if (request.getToCurrencies() == null) throw new IllegalArgumentException("toCurrencies cannot be null");
+        if (request.getFromCurrency() == null) throw new IllegalArgumentException("fromCurrency cannot be null");
+        if (request.getAmount() == null) throw new IllegalArgumentException("amount cannot be null");
+    }
+
+    private Map<String, BigDecimal> fetchCurrencyRates() {
+        List<CurrencyRate> rates = getCurrentExchangeRates();
+        return rates.stream().collect(Collectors.toMap(CurrencyRate::getCurrency, CurrencyRate::getRate));
+    }
+
+    private double convertAmount(Double amount, Double fromRate, Double toRate) {
+        return amount * fromRate / toRate;
+    }
+
+    private String formatResult(double amount, String fromCurrency, String toCurrency, double convertedAmount) {
+        return String.format("%.2f %s в %s = %.2f\n", amount, fromCurrency, toCurrency, convertedAmount);
     }
 
 
     //Не смог подключить хибернейт, так бы переписал в @Repository
     public List<CurrencyRate> getCurrentExchangeRates() {
         return jdbcTemplate.query(GET_ALL_CURRENCY_RATES,
-                (rs, rowNum) -> new CurrencyRate(rs.getString("currency"), rs.getDouble("rate")));
+                (rs, rowNum) -> new CurrencyRate(rs.getString("currency"), BigDecimal.valueOf(rs.getDouble("rate"))));
     }
 
     public List<Map<String, Object>> getExchangeHistory() {
         return jdbcTemplate.queryForList(GET_EXCHANGE_HISTORY);
     }
 
-    public void recordExchangeOperation(String fromCurrency, String toCurrency, double amount, double result) {
+    public void recordExchangeOperation(String fromCurrency, String toCurrency, BigDecimal amount, double result) {
         jdbcTemplate.update(
                 INSERT_INTO_EXCHANE_OPERATION,
                 fromCurrency, toCurrency, amount, result, new Date());
