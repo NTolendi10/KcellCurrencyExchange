@@ -19,7 +19,6 @@ import java.util.Map;
 @RequiredArgsConstructor
 public class CurrencyConverterController {
 
-    private final JdbcTemplate jdbcTemplate;
     private final ExchangeOperationService exchangeOperationService;
 
     @GetMapping("/convert")
